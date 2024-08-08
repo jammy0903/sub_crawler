@@ -1,0 +1,26 @@
+{
+  "webrtc.chatgpt.com": [
+    {
+      "url": "https://webrtc.chatgpt.com",
+      "input_tags": [],
+      "cookies": {
+        "__cf_bm": "dgNlDVtpASVjdnBa55ti4Vt7o6kkBD1aRcr9rSC5fKs-1723136510-1.0.1.1-ahD3WFzfiC8iF38dvOv5NSxMJf6v.AniT_iBxQxSImdhRxbl52r5eoluIlIJ5oDdN9Tq9F0bhUfo4OFTd.C36w"
+      },
+      "csrf_token": null,
+      "form_data": {},
+      "post_response": null
+    }
+  ],
+  "webrtc-staging.chatgpt.com": [
+    {
+      "url": "https://webrtc-staging.chatgpt.com",
+      "input_tags": [],
+      "cookies": {
+        "__cf_bm": "4UobYsxayGUfqi8.hjST4DuR5Wqs_C2ie43sG8Te.Qo-1723136513-1.0.1.1-jwx.LWx_aQTPYCPwNirAoTewqCcrMFzDnhikR3Hdik4OtmSAfgdxnefwYZ0P_IPxTLCtFVLopCvqz78uJjiI4g"
+      },
+      "csrf_token": null,
+      "form_data": {},
+      "post_response": null
+    }
+  ]
+}

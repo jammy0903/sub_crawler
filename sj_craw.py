@@ -17,31 +17,44 @@ def is_valid_subdomain(subdomain, domain):
     return re.match(pattern, subdomain) is not None
 
 #서브도메인 오픈소스이용 crt.sh
-def get_subdomains(domain):
-    url = f"https://crt.sh/?q=%.{domain}&output=json"
+def get_subdomains(domain, wildcard=True):
+    base_url = "https://crt.sh/?q={}&output=json"
+    if wildcard and "%" not in domain:
+        domain = "%.{}".format(domain)
+    url = base_url.format(domain)
+
+    ua = 'Mozilla/5.0 (Windows NT 6.1; WOW64; rv:40.0) Gecko/20100101 Firefox/40.1'
     try:
-        response = requests.get(url, timeout=10)
+        response = requests.get(url, headers={'User-Agent': ua}, timeout=10)
         response.raise_for_status()
-        response_json = response.json()
-        
-        subdomains = set()
-        for certi in response_json:
-            name_value = certi['name_value']
-            if name_value.endswith(domain) and name_value != domain and is_valid_subdomain(name_value, domain):
-                subdomains.add(name_value)
-        return list(subdomains)
+
+        if response.ok:
+            try:
+                content = response.content.decode('utf-8')
+                data = json.loads(content)  # JSON 데이터 파싱
+                subdomains = set()
+                for certi in data:
+                    name_value = certi['name_value']
+                    if name_value.endswith(domain) and name_value != domain and is_valid_subdomain(name_value, domain):
+                        subdomains.add(name_value)
+                return list(subdomains)
+            except ValueError:
+                data = json.loads("[{}]".format(content.replace('}{', '},{')))
+                subdomains = set()
+                for certi in data:
+                    name_value = certi['name_value']
+                    if name_value.endswith(domain) and name_value != domain and is_valid_subdomain(name_value, domain):
+                        subdomains.add(name_value)
+                return list(subdomains)
+            except Exception as err:
+                print("Error retrieving information: {}".format(err))
+                return []
     except requests.RequestException as e:
         print(f"Error request x: {e}")
         return []
 
-def get_subURLs(soup, base_url):
-    links = []
-    for a in soup.find_all('a', href=True):
-        href = a['href']
-        full_url = urljoin(base_url, href)
-        if full_url.startswith(base_url):
-            links.append(full_url)
-    return links
+
+
 
 def analyze_page(session, url):
     try:
@@ -97,6 +110,18 @@ def analyze_page(session, url):
         print(f"Error occurred while analyzing {url}: {str(e)}")
         return None
 
+
+def get_links(soup, base_url):
+    links = []
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        full_url = urljoin(base_url, href)
+        if full_url.startswith(base_url):
+            links.append(full_url)
+    return links
+
+
+
 def analyze_subdomain(subdomain):
     session = requests.Session()
     base_url = f"https://{subdomain}"
@@ -104,7 +129,7 @@ def analyze_subdomain(subdomain):
         response = session.get(base_url, timeout=10)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser', from_encoding=response.encoding)
-        links = get_subURLs(soup, base_url)
+        links = get_links(soup, base_url)
         
         results = [analyze_page(session, base_url)]
         for link in links[:5]:
@@ -124,7 +149,7 @@ def main():
     
     domain = sys.argv[1]
     subdomains = get_subdomains(domain)
-    print("Found subdomains:",len(subdomains),"WOW")
+    print("Found subdomains:")
     for subdomain in subdomains:
         print(subdomain)
     
