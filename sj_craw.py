@@ -1,179 +1,142 @@
-import requests , sys , json , warnings, re
-from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
-from urllib.parse import urljoin
+import scrapy
+from scrapy.crawler import CrawlerProcess
+import requests
+import json
+import os
+from urllib.parse import urlparse
 
-warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+class DomainSpider(scrapy.Spider):
+    name = "domain_spider"
 
-#xml or HTML 파싱 구분함수
-def parse_content(content, content_type):
-    if 'xml' in content_type.lower():
-        return BeautifulSoup(content, 'xml')
-    else:
-        return BeautifulSoup(content, 'html.parser')
+    def __init__(self, domain=None, max_depth=3, *args, **kwargs):
+        super(DomainSpider, self).__init__(*args, **kwargs)
+        self.domain = domain
+        self.max_depth = int(max_depth)
+        self.subdomains = set()
+        self.results = {}
 
-#valid 도메인 구분함수
-def is_valid_subdomain(subdomain, domain):
-    pattern = r'^[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)*\.' + re.escape(domain) + '$'  
-    return re.match(pattern, subdomain) is not None
+    def start_requests(self):
+        crt_subdomains = self.get_crtsh()
+        if crt_subdomains:
+            self.subdomains = crt_subdomains
+        else:
+            self.subdomains = self.load_seclists()
 
-#서브도메인 오픈소스이용 crt.sh
-def get_subdomains(domain, wildcard=True):
-    base_url = "https://crt.sh/?q={}&output=json"
-    if wildcard and "%" not in domain:
-        domain = "%.{}".format(domain)
-    url = base_url.format(domain)
+        for subdomain in self.subdomains:
+            url = f'http://{subdomain}'
+            yield scrapy.Request(url, callback=self.parse, meta={'subdomain': subdomain, 'depth': 0})
 
-    ua = 'Mozilla/5.0 (Windows NT 6.1; WOW64; rv:40.0) Gecko/20100101 Firefox/40.1'
-    try:
-        response = requests.get(url, headers={'User-Agent': ua}, timeout=10)
-        response.raise_for_status()
+    def get_crtsh(self):
+        url = f"https://crt.sh/?q=%.{self.domain}&output=json&expired=yes"
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            response_json = response.json()
 
-        if response.ok:
-            try:
-                content = response.content.decode('utf-8')
-                data = json.loads(content)  # JSON 데이터 파싱
-                subdomains = set()
-                for certi in data:
-                    name_value = certi['name_value']
-                    if name_value.endswith(domain) and name_value != domain and is_valid_subdomain(name_value, domain):
-                        subdomains.add(name_value)
-                return list(subdomains)
-            except ValueError:
-                data = json.loads("[{}]".format(content.replace('}{', '},{')))
-                subdomains = set()
-                for certi in data:
-                    name_value = certi['name_value']
-                    if name_value.endswith(domain) and name_value != domain and is_valid_subdomain(name_value, domain):
-                        subdomains.add(name_value)
-                return list(subdomains)
-            except Exception as err:
-                print("Error retrieving information: {}".format(err))
-                return []
-    except requests.RequestException as e:
-        print(f"Error request x: {e}")
-        return []
+            subdomains = set()
+            for certi in response_json:
+                name_value = certi['name_value']
+                if name_value.endswith(self.domain) and name_value != self.domain:
+                    subdomains.update(name_value.split('\n'))
+            return list(subdomains) if subdomains else None
+        except requests.RequestException as e:
+            self.logger.error(f"Error requesting crt.sh: {e}")
+            return None
 
+    def load_seclists(self):
+        seclists_path = os.path.join('SecLists', 'Discovery', 'DNS', 'subdomains-top1million-5000.txt')
+        try:
+            with open(seclists_path, 'r') as file:
+                return {line.strip() + '.' + self.domain for line in file}
+        except FileNotFoundError:
+            self.logger.error(f"SecLists file not found at {seclists_path}")
+            return set()
 
 
 
-def analyze_page(session, url):
-    try:
-        response = session.get(url, timeout=10)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser', from_encoding=response.encoding)
-        
+    def parse(self, response):
+        subdomain = response.meta['subdomain']
+        current_depth = response.meta['depth']
+        parsed_url = urlparse(response.url)
+        current_domain = parsed_url.netloc
+
+        if current_domain not in self.results:
+            self.results[current_domain] = {'pages': []}
+
+        page_data = self.extract_page_data(response)
+        self.results[current_domain]['pages'].append(page_data)
+
+        if current_depth < self.max_depth:
+            for href in response.css('a::attr(href)').getall():
+                full_url = response.urljoin(href)
+                if full_url.startswith(f'http://{self.domain}') or full_url.startswith(f'https://{self.domain}'):
+                    yield scrapy.Request(full_url, callback=self.parse, 
+                                         meta={'subdomain': subdomain, 'depth': current_depth + 1})
+
+    def extract_page_data(self, response):
         input_tags = []
-        for tag in soup.find_all(['input', 'textarea', 'select']):
-            if tag.name == 'input' and tag.get('type') in ['button', 'submit', 'reset']:
-                continue
-            input_tags.append(str(tag))
+        for tag in response.xpath('//input|//textarea|//select'):
+            tag_info = {
+                'type': tag.attrib.get('type', 'text'),
+                'name': tag.attrib.get('name', ''),
+                'id': tag.attrib.get('id', ''),
+                'value': tag.attrib.get('value', '')
+            }
+            input_tags.append(tag_info)
+
+        csrf_token = response.xpath('//meta[@name="csrf-token"]/@content').get()
         
         form_data = {}
-        for tag in soup.find_all(['input', 'textarea', 'select']):
-            if tag.get('name'):
-                if tag.name == 'select':
-                    options = tag.find_all('option')
-                    form_data[tag['name']] = options[0]['value'] if options else ''
-                else:
-                    form_data[tag['name']] = tag.get('value', 'test_value')
-        
-        csrf_token = None
-        csrf_meta = soup.find('meta', attrs={'name': 'csrf-token'})
-        if csrf_meta:
-            csrf_token = csrf_meta.get('content')
-            form_data['csrf_token'] = csrf_token
-        
-        post_response = None
-        if form_data:
-            try:
-                post_response = session.post(url, data=form_data, timeout=10)
-                post_response = post_response.text[:500]
-            except requests.RequestException as e:
-                post_response = f"POST request failed: {str(e)}"
+        for form in response.xpath('//form'):
+            form_id = form.attrib.get('id', '')
+            form_data[form_id] = {
+                'action': form.attrib.get('action', ''),
+                'method': form.attrib.get('method', 'get'),
+                'inputs': [
+                    {
+                        'name': input.attrib.get('name', ''),
+                        'value': input.attrib.get('value', 'test_value')
+                    }
+                    for input in form.xpath('.//input|.//textarea|.//select')
+                    if 'name' in input.attrib
+                ]
+            }
+
+        cookies = [cookie.decode() for cookie in response.headers.getlist('Set-Cookie')]
         
         return {
-            "url": url,
-            "input_tags": input_tags,
-            "cookies": dict(session.cookies),
-            "csrf_token": csrf_token,
-            "form_data": form_data,
-            "post_response": post_response
+            'url': response.url,
+            'input_tags': input_tags,
+            'csrf_token': csrf_token,
+            'form_data': form_data,
+            'cookies': cookies,
         }
-        
-    except requests.Timeout:
-        print(f"Timeout error occurred while accessing {url}")
-        return None
-    except requests.ConnectionError:
-        print(f"Connection error occurred while accessing {url}")
-        return None
-    except requests.RequestException as e:
-        print(f"Error occurred while analyzing {url}: {str(e)}")
-        return None
 
+    def closed(self, reason):
+        with open(f"{self.domain}_analysis.json", "w") as f:
+            json.dump(self.results, f, indent=2)
 
-def get_links(soup, base_url):
-    links = []
-    for a in soup.find_all('a', href=True):
-        href = a['href']
-        full_url = urljoin(base_url, href)
-        if full_url.startswith(base_url):
-            links.append(full_url)
-    return links
+    def error(self, failure):
+        self.logger.error(f"Error on {failure.request.url}: {str(failure.value)}")
 
-
-
-def analyze_subdomain(subdomain):
-    session = requests.Session()
-    base_url = f"https://{subdomain}"
-    try:
-        response = session.get(base_url, timeout=10)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser', from_encoding=response.encoding)
-        links = get_links(soup, base_url)
-        
-        results = [analyze_page(session, base_url)]
-        for link in links[:5]:
-            result = analyze_page(session, link)
-            if result:
-                results.append(result)
-        
-        return results
-    except requests.RequestException as e:
-        print(f"Error accessing {base_url}: {str(e)}")
-        return None
-
-def main():
-    if len(sys.argv) != 2:
-        print("Usage: python sub.py <domain>")
-        sys.exit(1)
-    
-    domain = sys.argv[1]
-    subdomains = get_subdomains(domain)
-    print("Found subdomains:")
-    for subdomain in subdomains:
-        print(subdomain)
-    
-    results = {}
-    for subdomain in subdomains:
-        print(f"\nAnalyzing {subdomain}...")
-        analysis = analyze_subdomain(subdomain)
-        if analysis:
-            results[subdomain] = analysis
-    
-    with open(f"{domain}_analysis.json", "w", encoding='utf-8') as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
-    
-    print(f"\nAnalysis complete. Results saved to {domain}_analysis.json")
+# Scrapy 설정
+settings = {
+    'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'LOG_LEVEL': 'INFO',
+    'CONCURRENT_REQUESTS': 32,
+    'DOWNLOAD_DELAY': 0.5,
+}
 
 if __name__ == "__main__":
-    main()
-        
-          
-        
-        
-        
-        
-        
-        
-        
- 
+    import sys
+
+    if len(sys.argv) < 2 or len(sys.argv) > 3:
+        print("Usage: python domain_spider.py <domain> [max_depth]")
+        sys.exit(1)
+
+    domain = sys.argv[1]
+    max_depth = int(sys.argv[2]) if len(sys.argv) == 3 else 3  # 기본값 3
+
+    process = CrawlerProcess(settings)
+    process.crawl(DomainSpider, domain=domain, max_depth=max_depth)
+    process.start()

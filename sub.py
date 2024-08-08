@@ -50,12 +50,14 @@ def analyze_page(session, url):
         soup = BeautifulSoup(response.content, 'html.parser', from_encoding=response.encoding)
         
         input_tags = []
+        #input tags를 여기에 모은다.
         for tag in soup.find_all(['input', 'textarea', 'select']):
             if tag.name == 'input' and tag.get('type') in ['button', 'submit', 'reset']:
                 continue
             input_tags.append(str(tag))
         
         form_data = {}
+        #form_tag를 여기에 모은다.
         for tag in soup.find_all(['input', 'textarea', 'select']):
             if tag.get('name'):
                 if tag.name == 'select':
