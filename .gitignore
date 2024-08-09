@@ -1,0 +1,7 @@
+# .gitignore 파일
+env/
+*.pyc
+__pycache__/
+*.log
+.vscode/
+subdomains-top1million-5000.txt

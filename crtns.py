@@ -1,19 +1,27 @@
-import scrapy
 from scrapy.crawler import CrawlerProcess
-import requests
-import json
-import os
+import requests, json, os, scrapy
 from urllib.parse import urlparse
+
+def download_seclists_file():
+    url = "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Discovery/DNS/subdomains-top1million-5000.txt"
+    local_filename = "subdomains-top1million-5000.txt"
+    if not os.path.exists(local_filename):
+        with requests.get(url, stream=True) as r:
+            r.raise_for_status()
+            with open(local_filename, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+    return local_filename
 
 class DomainSpider(scrapy.Spider):
     name = "domain_spider"
-
+    
     def __init__(self, domain=None, max_depth=3, *args, **kwargs):
-        super(DomainSpider, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.domain = domain
         self.max_depth = int(max_depth)
-        self.subdomains = set()
         self.results = {}
+        self.seclists_file = download_seclists_file()  # 파일 다운로드
 
     def start_requests(self):
         crt_subdomains = self.get_crtsh()
@@ -21,6 +29,9 @@ class DomainSpider(scrapy.Spider):
             self.subdomains = crt_subdomains
         else:
             self.subdomains = self.load_seclists()
+
+        if not self.subdomains:
+            self.subdomains = [self.domain]
 
         for subdomain in self.subdomains:
             url = f'http://{subdomain}'
@@ -38,21 +49,18 @@ class DomainSpider(scrapy.Spider):
                 name_value = certi['name_value']
                 if name_value.endswith(self.domain) and name_value != self.domain:
                     subdomains.update(name_value.split('\n'))
-            return list(subdomains) if subdomains else None
+            return list(subdomains) if subdomains else []
         except requests.RequestException as e:
             self.logger.error(f"Error requesting crt.sh: {e}")
-            return None
+            return []
 
     def load_seclists(self):
-        seclists_path = os.path.join('SecLists', 'Discovery', 'DNS', 'subdomains-top1million-5000.txt')
         try:
-            with open(seclists_path, 'r') as file:
+            with open(self.seclists_file, 'r') as file:
                 return {line.strip() + '.' + self.domain for line in file}
         except FileNotFoundError:
-            self.logger.error(f"SecLists file not found at {seclists_path}")
+            self.logger.error(f"SecLists file not found at {self.seclists_file}")
             return set()
-
-
 
     def parse(self, response):
         subdomain = response.meta['subdomain']
@@ -71,7 +79,8 @@ class DomainSpider(scrapy.Spider):
                 full_url = response.urljoin(href)
                 if full_url.startswith(f'http://{self.domain}') or full_url.startswith(f'https://{self.domain}'):
                     yield scrapy.Request(full_url, callback=self.parse, 
-                                         meta={'subdomain': subdomain, 'depth': current_depth + 1})
+                                         meta={'subdomain': subdomain, 'depth': current_depth + 1}, 
+                                         dont_filter=True)
 
     def extract_page_data(self, response):
         input_tags = []
@@ -85,7 +94,7 @@ class DomainSpider(scrapy.Spider):
             input_tags.append(tag_info)
 
         csrf_token = response.xpath('//meta[@name="csrf-token"]/@content').get()
-        
+
         form_data = {}
         for form in response.xpath('//form'):
             form_id = form.attrib.get('id', '')
@@ -103,7 +112,7 @@ class DomainSpider(scrapy.Spider):
             }
 
         cookies = [cookie.decode() for cookie in response.headers.getlist('Set-Cookie')]
-        
+
         return {
             'url': response.url,
             'input_tags': input_tags,
